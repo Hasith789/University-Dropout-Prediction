@@ -1,47 +1,58 @@
-# University Dropout Prediction System Using Real MongoDB & Machine Learning
+# University Dropout Prediction System
 
-**Course:** CSE494: Intelligent NoSQL Databases (CA2 Academic Evaluation)  
+**Course:** CSE494: Intelligent NoSQL Databases | Academic Project  
 **Institution:** Lovely Professional University (LPU)  
-**Database:** Real MongoDB Community Server / MongoDB Atlas (`university_dropout_db`)  
-**Database Operations:** 100% Native MongoDB Shell (`mongosh`) JavaScript Scripts  
-**ML Framework:** Scikit-learn (Random Forest & Logistic Regression baseline)  
-**Web Dashboard:** Streamlit (`app.py`)  
+**Database Interface:** Real MongoDB via PyMongo (`database.py`, `app.py`)  
+**Database Engine:** MongoDB Community Server / MongoDB Atlas (`university_dropout_db`)  
+**Collections:** `students` (4,424 documents), `predictions` (audit logs)  
+**Machine Learning:** Scikit-learn (Random Forest Classifier & Logistic Regression baseline)  
+**User Interface:** Streamlit Academic Dark-Mode Dashboard (`app.py`)  
 
 ---
 
-## 1. Native MongoDB Shell (mongosh) Database Layer
+## 1. Project Architecture & Database Layer
 
-All database operations are implemented using native MongoDB Shell (`mongosh`) JavaScript scripts.
+All application-level database operations are implemented using **PyMongo** inside [`database.py`](file:///c:/Users/HP/OneDrive/Documents/Desktop/New%20folder/Project/database.py). 
 
-- No SQLite, JSON files, dictionaries, or Pandas DataFrames are used as database substitutes.
-- All 4,424 student profiles and prediction audit logs are physically stored in and retrieved from MongoDB.
-- Every script selects the project database at the beginning:
-  ```javascript
-  const db = db.getSiblingDB("university_dropout_db");
-  ```
-- All scripts are safe to run repeatedly and do not drop existing data.
+- **Connection Management:** `MongoClient` configured with connection pooling (`@st.cache_resource`), timeouts, and `certifi` TLS root certificates for MongoDB Atlas.
+- **Connection Verification:** Live connection verified with administrative `ping` command before reporting connected status.
+- **Data Integrity:** B-Tree unique index on `student_id` prevents duplicate student entries; compound and reverse-chronological indexes optimize prediction queries.
+- **Pure PyMongo API:** All queries, CRUD operations, aggregations, and query plan inspections use native PyMongo methods:
+  - `find()`, `find_one()`
+  - `insert_one()`
+  - `update_one()` with `$set`
+  - `delete_one()`
+  - `count_documents()`
+  - `aggregate()` with multi-stage pipelines
+  - `create_index()`
+  - `explain()`
+- **MongoDB Shell Scripts:** Standalone JavaScript scripts in [`mongodb/`](file:///c:/Users/HP/OneDrive/Documents/Desktop/New%20folder/Project/mongodb) are maintained for CA2 viva demonstrations in `mongosh` and MongoDB Compass.
 
 ---
 
-## 2. Project Structure
+## 2. Directory Structure
 
 ```text
 university-dropout-prediction/
 ├── dataset.csv                  # Original Kaggle/UCI student dataset (4,424 records)
-├── students_prepared.csv        # Prepared CSV with stable student_id for mongoimport
+├── students_prepared.csv        # Prepared CSV with stable student_id for import
 ├── ML_Training.ipynb            # Standard college Jupyter Notebook (10 sequential ML sections)
-├── model.pkl                    # Serialized trained Random Forest model & feature metadata
-├── app.py                       # Streamlit web application displaying live MongoDB queries
-├── requirements.txt             # Python dependencies
-├── .env.example                 # Environment template
-├── .env                         # Active database configuration (local or Atlas)
-├── .gitignore                   # Version control ignore list
-├── README.md                    # Project documentation and query reference
-└── mongodb/                     # 100% Native MongoDB Shell (mongosh) JavaScript Layer
+├── model.pkl                    # Exported model package (RF & LR models, scaler, metrics)
+├── database.py                  # PyMongo database layer (CRUD, aggregations, indexes, explain)
+├── app.py                       # Streamlit web application (compact dark-mode dashboard)
+├── requirements.txt             # Python dependencies (PyMongo, Scikit-learn, Streamlit, etc.)
+├── .env.example                 # Environment variable template
+├── .env                         # Active local or cloud connection string (ignored by git)
+├── .gitignore                   # Version control exclusions
+├── README.md                    # Project documentation and setup guide
+├── .streamlit/
+│   ├── config.toml              # Dark theme configuration
+│   └── secrets.toml.example     # Streamlit Cloud secrets template
+└── mongodb/                     # 100% Native MongoDB Shell (mongosh) JavaScript layer
     ├── setup.js                 # Database & collection initialization (ping, list databases)
     ├── import_students.js       # Native mongosh CSV data importer (bulkWrite with upsert)
-    ├── crud.js                  # Standard CRUD (insertOne, findOne, updateOne, deleteOne)
-    ├── predictions.js           # ML prediction logging (insertOne, sort, limit, query by ID)
+    ├── crud.js                  # Standard CRUD demonstration
+    ├── predictions.js           # Prediction logging demonstration
     ├── aggregation.js           # Multi-stage pipelines ($group, $project, $sort, $match)
     ├── indexes.js               # B-Tree index creation and query optimization (explain())
     └── verify.js                # Automated 7-point verification suite (7/7 checks passed)
@@ -49,213 +60,112 @@ university-dropout-prediction/
 
 ---
 
-## 3. Terminal Commands to Execute Each Script
+## 3. Installation & Local Setup
 
-You can execute all database scripts directly from the terminal using `mongosh`:
-
-### Option A: Running against Local MongoDB Community Server
+### Step 1: Install Python Dependencies
+Ensure Python 3.10 or compatible is installed, then run:
 ```powershell
-# 1. Setup & Connection Ping
-mongosh "mongodb://localhost:27017" mongodb/setup.js
-
-# 2. Build B-Tree Indexes & Inspect Query Plan with explain()
-mongosh "mongodb://localhost:27017" mongodb/indexes.js
-
-# 3. Import Students from CSV (Upsert mode - safe to re-run)
-mongosh "mongodb://localhost:27017" mongodb/import_students.js
-
-# 4. Demonstrate Full CRUD Operations (Insert, Find, Update, Delete)
-mongosh "mongodb://localhost:27017" mongodb/crud.js
-
-# 5. Insert & Retrieve ML Predictions with Timestamps
-mongosh "mongodb://localhost:27017" mongodb/predictions.js
-
-# 6. Run Native Aggregation Pipelines ($group, $project, $sort, $match)
-mongosh "mongodb://localhost:27017" mongodb/aggregation.js
-
-# 7. Run Full Automated Verification Suite (7/7 Checks)
-mongosh "mongodb://localhost:27017" mongodb/verify.js
+pip install -r requirements.txt
 ```
 
-### Option B: Running against MongoDB Atlas (Cloud)
-If using MongoDB Atlas, supply your Atlas URI:
+### Step 2: Configure Environment Variables
+Create or edit your [`.env`](file:///c:/Users/HP/OneDrive/Documents/Desktop/New%20folder/Project/.env) file:
+
+```env
+# For MongoDB Atlas (Cloud):
+MONGODB_URI=mongodb+srv://<username>:<password>@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority
+
+# Or for Local MongoDB Community Server:
+# MONGODB_URI=mongodb://localhost:27017
+
+MONGODB_DATABASE=university_dropout_db
+```
+
+### Step 3: Import the Dataset
+If running against a fresh MongoDB instance, import all 4,424 records from `students_prepared.csv`:
 ```powershell
-mongosh "mongodb+srv://<username>:<password>@cluster0.xxxxx.mongodb.net" mongodb/verify.js
+# Using mongosh:
+mongosh "YOUR_MONGODB_URI" mongodb/import_students.js
+
+# Or using PyMongo:
+python -c "import database; db, _, _ = database.get_active_db(); print('Students:', database.count_students(db))"
 ```
 
----
-
-## 4. MongoDB Database Setup & Collections (university_dropout_db)
-
-The database contains two collections:
-
-### Collection 1: students
-Stores student records imported from `dataset.csv`:
-- Preserves all 34 original attributes and the target column (`Dropout`, `Enrolled`, `Graduate`).
-- Assigns a stable identifier: `student_id` (`STU-0001` through `STU-4424`).
-- **Duplicate Prevention:** Uses `bulkWrite` with `updateOne: { filter: { student_id: ... }, update: { $setOnInsert: doc }, upsert: true }`.
-- **Indexes:**
-  - `idx_unique_student_id` on `{ student_id: 1 }` (**Unique**): Enforces uniqueness and provides fast logarithmic B-Tree lookups.
-  - `idx_students_target` on `{ Target: 1 }`: Optimizes outcome filtering and cohort aggregation.
-  - `idx_students_course` on `{ Course: 1 }`: Optimizes degree program queries.
-
-### Collection 2: predictions
-Stores inference documents generated by the machine learning model:
-```json
-{
-  "_id": ObjectId("6adaff7bb45218096573efb0"),
-  "student_id": "STU-0001",
-  "predicted_outcome": "Dropout",
-  "class_probabilities": {
-    "Dropout": 0.77,
-    "Enrolled": 0.03,
-    "Graduate": 0.20
-  },
-  "model_name": "Random Forest Classifier",
-  "prediction_timestamp": ISODate("2026-10-23T06:32:27.000Z"),
-  "feature_set": "Full Academic Features (1st & 2nd Sem)",
-  "risk_tier": "High Risk"
-}
-```
-- **Indexes:**
-  - `idx_pred_timestamp` on `{ prediction_timestamp: -1 }`: Enables fast reverse-chronological retrieval.
-  - `idx_pred_student_id` on `{ student_id: 1 }`: Enables fast lookups by student ID.
-
----
-
-## 5. CSV Import Methods
-
-### Method 1: Native mongosh Importer (mongodb/import_students.js)
-Runs directly in `mongosh` using Node.js built-in `fs.readFileSync` and native `bulkWrite` with `$setOnInsert`. It reads `students_prepared.csv` and upserts all 4,424 records:
-```powershell
-mongosh "mongodb://localhost:27017" mongodb/import_students.js
-```
-
-### Method 2: MongoDB Database Tools (mongoimport)
-```powershell
-mongoimport --uri="mongodb://localhost:27017/university_dropout_db" `
-            --collection=students `
-            --type=csv `
-            --headerline `
-            --file=students_prepared.csv `
-            --mode=upsert `
-            --upsertFields=student_id
-```
-
----
-
-## 6. MongoDB Compass Verification & Mongosh Query Reference
-
-### Procedure to Inspect in MongoDB Compass:
-1. Open **MongoDB Compass**.
-2. Connect to `mongodb://localhost:27017` (or your Atlas URI).
-3. Select `university_dropout_db` in the left sidebar.
-4. Verify collections:
-   - `students`: Contains all 4,424 student documents.
-   - `predictions`: Contains recorded model predictions.
-5. In `students`, select the **Indexes** tab to verify `idx_unique_student_id` and `idx_students_target`.
-6. Open the `_mongosh` panel at the bottom to execute queries directly:
-
-```javascript
-// 1. Switch to the database
-use university_dropout_db;
-
-// 2. Count total student documents (verifies 4,424)
-db.students.countDocuments({});
-
-// 3. View a sample student record
-db.students.findOne();
-
-// 4. Query student by student_id
-db.students.findOne({ student_id: "STU-0001" });
-
-// 5. Pipeline 1: Group and count by Target outcome ($group, $sort)
-db.students.aggregate([
-  { $group: { _id: "$Target", count: { $sum: 1 } } },
-  { $sort: { count: -1 } }
-]);
-
-// 6. Pipeline 2: Dropout rate by Course ($group, $project, $sort)
-db.students.aggregate([
-  {
-    $group: {
-      _id: "$Course",
-      total: { $sum: 1 },
-      dropouts: { $sum: { $cond: [{ $eq: ["$Target", "Dropout"] }, 1, 0] } }
-    }
-  },
-  {
-    $project: {
-      course_id: "$_id",
-      total_students: "$total",
-      dropouts: "$dropouts",
-      dropout_rate: {
-        $cond: [
-          { $eq: ["$total", 0] },
-          0,
-          {
-            $round: [{ $multiply: [{ $divide: ["$dropouts", "$total"] }, 100] }, 1]
-          }
-        ]
-      },
-      _id: 0
-    }
-  },
-  { $sort: { dropout_rate: -1 } }
-]);
-
-// 7. Retrieve recent predictions
-db.predictions.find().sort({ prediction_timestamp: -1 }).limit(10);
-
-// 8. Inspect query plan with explain("executionStats")
-db.students.find({ student_id: "STU-0001" }).explain("executionStats");
-```
-
----
-
-## 7. Query Optimization Proof via explain()
-
-When running `mongodb/indexes.js` in `mongosh`:
-- **Indexed Query (`student_id`):** Stage is **`EXPRESS_IXSCAN` / `IXSCAN`** using `idx_unique_student_id` (0 ms, examines 1 document).
-- **Unindexed Query (`Age at enrollment`):** Stage is **`COLLSCAN`** (Collection Scan) scanning all 4,424 documents sequentially.
-
----
-
-## 8. Machine Learning: ML_Training.ipynb
-
-The machine learning workflow uses Scikit-learn, Pandas, NumPy, Matplotlib, and Seaborn:
-- **Baseline Model:** Logistic Regression (`75.82%` accuracy, `69.4%` dropout recall).
-- **Selected Model:** Random Forest Classifier (`77.85%` accuracy, `75.4%` dropout recall).
-- **Model Saved:** Exported to `model.pkl` using `joblib.dump()`.
-
----
-
-## 9. Running the Streamlit Application
-
+### Step 4: Run the Streamlit Application
 ```powershell
 streamlit run app.py
 ```
-Open `http://localhost:8501` in your browser.
+Open **`http://localhost:8501`** in your browser.
 
 ---
 
-## 10. CSE494 Academic Viva Q&A Reference
+## 4. Machine Learning Models & Evaluation Methodology
 
-### Q1: Why use MongoDB (NoSQL) instead of SQL?
-* **Answer:** Student profiles contain semi-structured and evolving data (demographics, grades, prediction logs). MongoDB represents each student profile as a single BSON document without needing complex multi-table SQL `JOIN` operations.
+The machine learning workflow uses Scikit-learn on a held-out stratified 20% test partition ($N = 885$) from `dataset.csv`:
 
-### Q2: What is the difference between Database, Collection, Document, and BSON?
-* **Answer:** Database is the top-level container (`university_dropout_db`); Collection is analogous to a table (`students`, `predictions`); Document is analogous to a row (key-value BSON object); BSON is MongoDB's binary JSON format supporting typed data including dates and object identifiers.
+### Models Trained:
+1. **Logistic Regression (Baseline):** Preprocessing with `StandardScaler` fitted strictly on training data inside a `Pipeline` to prevent target leakage.
+2. **Random Forest Classifier (Selected):** Ensemble model with 100 decision trees. Selected based on superior Macro F1 and Dropout recall.
 
-### Q3: Explain Embedding vs. Referencing in this project.
-* **Answer:** We embedded class probabilities inside individual prediction documents, but **referenced** predictions back to the `students` collection via `student_id`. This allows the prediction history to grow indefinitely without exceeding the 16MB document size limit.
+### Measured Evaluation Benchmarks (Test Set $N = 885$):
 
-### Q4: How do indexes improve query speed and how does explain() prove it?
-* **Answer:** An index creates a sorted B-Tree in memory. Running `db.students.find({ student_id: "STU-0001" }).explain("executionStats")` shows the query engine uses `EXPRESS_IXSCAN` / `IXSCAN` ($O(\log N)$) rather than a linear `COLLSCAN` ($O(N)$).
+| Metric | Logistic Regression (Baseline) | Random Forest Classifier (Selected) |
+| :--- | :---: | :---: |
+| **Accuracy** | 75.82% | **77.85%** |
+| **Macro Precision** | 69.60% | **73.29%** |
+| **Macro Recall** | 66.52% | **68.95%** |
+| **Macro F1-Score** | 67.25% | **70.14%** |
+| **Weighted F1-Score** | 74.32% | **76.46%** |
+| **Dropout Precision** | 79.18% | **81.92%** |
+| **Dropout Recall** | 75.00% | **75.00%** |
+| **Dropout F1-Score** | 77.03% | **78.31%** |
 
-### Q5: Explain the Aggregation Pipeline stages used in aggregation.js.
+### Target Classes:
+- `Dropout`
+- `Enrolled`
+- `Graduate`
+
+### Feature Timing & Data Leakage Discussion:
+- Second-semester curricular units approved and grade averages are the highest-ranked predictive features in Random Forest Gini importance.
+- If designing an **early pre-enrollment screening model**, second-semester attributes must be excluded to prevent information leakage.
+- Predictions are statistical estimates intended to assist academic advisors and are not clinically, institutionally, or operationally validated.
+
+---
+
+## 5. Deployment to Streamlit Community Cloud
+
+### Step 1: Configure Secrets
+In your Streamlit Cloud app dashboard:
+1. Go to **Settings** ➔ **Secrets**.
+2. Add your Atlas credentials:
+```toml
+MONGODB_URI = "mongodb+srv://<username>:<password>@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority"
+MONGODB_DATABASE = "university_dropout_db"
+```
+3. Click **Save**.
+
+### Step 2: Whitelist Streamlit Cloud IP in MongoDB Atlas
+1. Log in to [cloud.mongodb.com](https://cloud.mongodb.com/).
+2. Navigate to **Network Access** under Security.
+3. Add IP Address: `0.0.0.0/0` (Allow access from anywhere).  
+   *(Required because Streamlit Cloud runs on dynamic cloud IP addresses).*
+
+---
+
+## 6. Academic Viva Reference (CSE494)
+
+### Q1: Why use PyMongo instead of raw shell commands in production?
+* **Answer:** PyMongo provides connection pooling (`MongoClient`), automatic type translation between Python and BSON, parameter injection protection, and native integration with Pandas DataFrames and web frameworks like Streamlit.
+
+### Q2: What is the difference between Embedding and Referencing in this project?
+* **Answer:** Class probabilities and student snapshots are **embedded** inside individual prediction documents for atomic retrieval. However, predictions **reference** the `students` collection via `student_id` to allow infinite audit growth without exceeding the 16MB document size limit.
+
+### Q3: How do indexes improve query speed and how does `explain()` prove it?
+* **Answer:** B-Tree indexes create sorted pointer structures in memory. Running `db.students.find({ student_id: "STU-0001" }).explain()` demonstrates that MongoDB uses `EXPRESS_IXSCAN` / `IXSCAN` ($O(\log N)$) rather than a full collection scan `COLLSCAN` ($O(N)$).
+
+### Q4: Explain the Aggregation Pipeline stages used in course dropout calculation.
 * **Answer:**
-  - `$match`: Filters documents (analogous to SQL `WHERE`).
-  - `$group`: Groups documents by an identifier (`_id`) and applies accumulators such as `$sum`.
-  - `$project`: Reshapes output documents and calculates derived percentage fields.
-  - `$sort`: Orders documents ascending (1) or descending (-1).
+  - `$group`: Groups documents by `Course`, computes total students, and conditionally accumulates dropouts using `$cond`.
+  - `$project`: Calculates derived percentage fields while guarding against division-by-zero using `$cond: [ { $eq: ["$total", 0] }, 0, ... ]`.
+  - `$sort`: Orders documents descending by dropout rate (`-1`).
+  - `$limit`: Restricts output to the top programs.
