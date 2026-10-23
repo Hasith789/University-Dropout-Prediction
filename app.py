@@ -2,7 +2,8 @@
 app.py - University Dropout Prediction System
 Course: CSE494 Intelligent NoSQL Databases | Academic Project
 
-Clean, compact, dark-mode academic dashboard integrating MongoDB with Scikit-learn.
+Clean, compact, dark-mode academic dashboard integrating PyMongo with Scikit-learn models.
+All application database operations are executed via native PyMongo methods.
 """
 
 import os
@@ -13,42 +14,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import joblib
-from dotenv import load_dotenv
-from pymongo import MongoClient
 
-# Load environment configuration
-load_dotenv(override=True)
-
-def get_connection_config():
-    """Retrieve MongoDB URI and Database Name supporting Streamlit Cloud Secrets and .env."""
-    uri = None
-    db_name = None
-
-    # 1. Streamlit Cloud Secrets (st.secrets)
-    try:
-        if hasattr(st, "secrets"):
-            if "MONGODB_URI" in st.secrets:
-                uri = str(st.secrets["MONGODB_URI"]).strip()
-            if "MONGODB_DATABASE" in st.secrets:
-                db_name = str(st.secrets["MONGODB_DATABASE"]).strip()
-    except Exception:
-        pass
-
-    # 2. Environment Variables (.env or OS)
-    if not uri:
-        uri = os.getenv("MONGODB_URI")
-    if not db_name:
-        db_name = os.getenv("MONGODB_DATABASE")
-
-    # 3. Fallback default
-    if not uri:
-        uri = "mongodb://localhost:27017"
-    if not db_name:
-        db_name = "university_dropout_db"
-
-    return uri, db_name
-
-MONGODB_URI, DATABASE_NAME = get_connection_config()
+# Import dedicated PyMongo database layer
+import database
 
 # Set page configuration
 st.set_page_config(
@@ -217,7 +185,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Course ID mapping
+# Friendly mapping for Course IDs
 COURSE_NAMES = {
     1: "Biofuel Production Technologies",
     2: "Animation and Multimedia Design",
@@ -240,55 +208,24 @@ COURSE_NAMES = {
 
 
 # ==============================================================================
-# DATABASE CONNECTION
+# CACHED MONGODB CONNECTION
 # ==============================================================================
-def get_mongo_client(uri: str, timeout_ms: int = 3000) -> MongoClient:
-    """Create a MongoClient configured with proper TLS/SSL certificates."""
-    kwargs = {"serverSelectionTimeoutMS": timeout_ms}
-    if "mongodb.net" in uri or "+srv" in uri:
-        try:
-            import certifi
-            kwargs["tlsCAFile"] = certifi.where()
-        except ImportError:
-            pass
-    return MongoClient(uri, **kwargs)
+@st.cache_resource(show_spinner=False)
+def get_cached_client(uri: str):
+    """Obtain a pooled PyMongo client cached across Streamlit interactions."""
+    return database.create_mongo_client(uri, timeout_ms=3000)
 
 
-def get_db():
-    uri, db_name = get_connection_config()
-    client = get_mongo_client(uri, timeout_ms=3000)
-    return client[db_name]
-
-
-def test_db_connection():
-    uri, db_name = get_connection_config()
-    is_atlas = "mongodb.net" in uri or "+srv" in uri
-    host_type = "MongoDB Atlas" if is_atlas else "Local MongoDB"
-    try:
-        client = get_mongo_client(uri, timeout_ms=3000)
-        client.admin.command("ping")
-        server_info = client.server_info()
-        version = server_info.get("version", "Unknown")
-        client.close()
-        return True, host_type, version, None
-    except Exception as e:
-        err = str(e)
-        if "TLSV1_ALERT_INTERNAL_ERROR" in err or "SSL handshake failed" in err:
-            err = (
-                "Atlas SSL handshake failed. In MongoDB Atlas, this occurs when the connecting IP address "
-                "is not whitelisted. In your MongoDB Atlas Console, go to Network Access -> Add IP Address "
-                "-> Allow Access from Anywhere (0.0.0.0/0)."
-            )
-        elif "localhost:27017" in uri and ("[Errno 111]" in err or "Connection refused" in err):
-            err = (
-                "Cannot connect to local MongoDB. If running on Streamlit Cloud, add your "
-                "MongoDB Atlas connection string in Streamlit App Settings > Secrets."
-            )
-        return False, host_type, None, err
+def get_active_db():
+    """Retrieve active database instance with connection verification."""
+    uri, db_name = database.get_connection_config(getattr(st, "secrets", None))
+    client = get_cached_client(uri)
+    return client[db_name], uri, db_name
 
 
 @st.cache_resource
 def load_ml_model():
+    """Load model package containing trained RF and LR models with evaluation metrics."""
     if os.path.exists("model.pkl"):
         return joblib.load("model.pkl")
     return None
@@ -318,44 +255,6 @@ def create_dark_figure(figsize=(6, 3.2)):
 
 
 # ==============================================================================
-# PREDICTION VALIDATION
-# ==============================================================================
-def validate_prediction_payload(payload: dict) -> tuple[bool, str]:
-    required = [
-        "student_id",
-        "predicted_outcome",
-        "class_probabilities",
-        "model_name",
-        "prediction_timestamp",
-        "risk_tier",
-    ]
-    for field in required:
-        if field not in payload or payload[field] is None:
-            return False, f"Missing required field: {field}"
-
-    if not isinstance(payload["student_id"], str) or not payload["student_id"].strip():
-        return False, "student_id must be a non-empty string."
-
-    if payload["predicted_outcome"] not in ["Dropout", "Enrolled", "Graduate"]:
-        return False, f"Invalid predicted_outcome: {payload['predicted_outcome']}"
-
-    if not isinstance(payload["class_probabilities"], dict):
-        return False, "class_probabilities must be a dictionary."
-
-    for cls in ["Dropout", "Enrolled", "Graduate"]:
-        if cls not in payload["class_probabilities"]:
-            return False, f"class_probabilities missing probability for '{cls}'."
-
-    if not isinstance(payload["prediction_timestamp"], datetime):
-        return False, "prediction_timestamp must be a valid datetime instance."
-
-    if payload["risk_tier"] not in ["High Risk", "Moderate Risk", "Low Risk"]:
-        return False, f"Invalid risk_tier: {payload['risk_tier']}"
-
-    return True, "Valid"
-
-
-# ==============================================================================
 # SIDEBAR
 # ==============================================================================
 with st.sidebar:
@@ -369,7 +268,10 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-    is_connected, host_type, db_version, err_msg = test_db_connection()
+    # Verify live connection using ping command
+    uri, db_name = database.get_connection_config(getattr(st, "secrets", None))
+    client = get_cached_client(uri)
+    is_connected, host_type, db_version, err_msg = database.verify_connection(client, uri)
 
     if is_connected:
         st.markdown(
@@ -380,7 +282,7 @@ with st.sidebar:
                 </div>
                 <div style="font-size: 0.72rem; color: #9AA7B8; margin-top: 2px;">
                     Host: {host_type}<br>
-                    DB: <code>{DATABASE_NAME}</code>
+                    DB: <code>{db_name}</code>
                 </div>
             </div>
             """,
@@ -395,7 +297,7 @@ with st.sidebar:
                 </div>
                 <div style="font-size: 0.72rem; color: #9AA7B8; margin-top: 2px;">
                     Host: {host_type}<br>
-                    DB: <code>{DATABASE_NAME}</code>
+                    DB: <code>{db_name}</code>
                 </div>
             </div>
             """,
@@ -446,24 +348,20 @@ if menu_choice == "Dashboard":
         st.error(f"Database connection unavailable ({host_type}): {err_msg}")
         st.stop()
 
-    db = get_db()
+    db, _, _ = get_active_db()
 
-    # Query metrics from MongoDB
-    total_students = db.students.count_documents({})
-    total_preds = db.predictions.count_documents({})
+    # Query metrics via PyMongo
+    total_students = database.count_students(db)
+    total_preds = database.count_predictions(db)
 
-    pipeline_outcome = [
-        {"$group": {"_id": "$Target", "count": {"$sum": 1}}},
-        {"$sort": {"count": -1}},
-    ]
-    outcome_counts = list(db.students.aggregate(pipeline_outcome))
-    dist_map = {item["_id"]: item["count"] for item in outcome_counts}
+    dist_res = database.get_academic_outcome_distribution(db)
+    dist_map = {item["outcome"]: item["count"] for item in dist_res}
 
     dropouts = dist_map.get("Dropout", 0)
     graduates = dist_map.get("Graduate", 0)
     enrolled = dist_map.get("Enrolled", 0)
 
-    # Metric Cards Row (5 Cards)
+    # 5 Metric Cards Row
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Total Students", f"{total_students:,}")
     m2.metric("Saved Predictions", f"{total_preds:,}")
@@ -481,12 +379,12 @@ if menu_choice == "Dashboard":
             "<div style='font-size: 0.92rem; font-weight: 600; color: #E8EDF4; margin-bottom: 4px;'>Student Academic Outcome Distribution</div>",
             unsafe_allow_html=True,
         )
-        if outcome_counts:
-            df_dist = pd.DataFrame([{"Outcome": r["_id"], "Count": r["count"]} for r in outcome_counts])
+        if dist_res:
+            df_dist = pd.DataFrame(dist_res)
             fig_dist, ax_dist = create_dark_figure(figsize=(5.2, 2.7))
             palette = {"Graduate": "#27AE60", "Dropout": "#EF4444", "Enrolled": "#4C8DFF"}
-            bar_colors = [palette.get(o, "#7f8c8d") for o in df_dist["Outcome"]]
-            bars = ax_dist.bar(df_dist["Outcome"], df_dist["Count"], color=bar_colors, width=0.48)
+            bar_colors = [palette.get(o, "#7f8c8d") for o in df_dist["outcome"]]
+            bars = ax_dist.bar(df_dist["outcome"], df_dist["count"], color=bar_colors, width=0.48)
             ax_dist.set_ylabel("Document Count")
             for bar in bars:
                 h = bar.get_height()
@@ -510,40 +408,7 @@ if menu_choice == "Dashboard":
             "<div style='font-size: 0.92rem; font-weight: 600; color: #E8EDF4; margin-bottom: 4px;'>Top 10 Courses by Dropout Rate</div>",
             unsafe_allow_html=True,
         )
-        course_pipeline = [
-            {
-                "$group": {
-                    "_id": "$Course",
-                    "total": {"$sum": 1},
-                    "dropouts": {
-                        "$sum": {"$cond": [{"$eq": ["$Target", "Dropout"]}, 1, 0]}
-                    },
-                }
-            },
-            {
-                "$project": {
-                    "course_id": "$_id",
-                    "total_students": "$total",
-                    "dropouts": "$dropouts",
-                    "dropout_rate": {
-                        "$cond": [
-                            {"$eq": ["$total", 0]},
-                            0,
-                            {
-                                "$round": [
-                                    {"$multiply": [{"$divide": ["$dropouts", "$total"]}, 100]},
-                                    1,
-                                ]
-                            },
-                        ]
-                    },
-                    "_id": 0,
-                }
-            },
-            {"$sort": {"dropout_rate": -1}},
-            {"$limit": 10},
-        ]
-        course_data = list(db.students.aggregate(course_pipeline))
+        course_data = database.get_top_courses_dropout_rate(db, limit=10)
 
         if course_data:
             df_course = pd.DataFrame(course_data)
@@ -656,7 +521,7 @@ elif menu_choice == "Student Prediction":
         <div style="margin-bottom: 0.75rem;">
             <div style="font-size: 1.35rem; font-weight: 600; color: #E8EDF4;">Student Prediction</div>
             <div style="font-size: 0.82rem; color: #9AA7B8;">
-                Inference using trained Random Forest model. Predictions are validated and recorded into MongoDB.
+                Inference using trained Random Forest model. Validated predictions are stored into MongoDB predictions collection via PyMongo.
             </div>
         </div>
         """,
@@ -674,7 +539,7 @@ elif menu_choice == "Student Prediction":
     rf_model = model_package["model"]
     feature_names = model_package["feature_names"]
     classes = model_package["classes"]
-    db = get_db()
+    db, _, _ = get_active_db()
 
     input_method = st.radio(
         "Input Mode:",
@@ -689,8 +554,8 @@ elif menu_choice == "Student Prediction":
     if input_method == "Retrieve from MongoDB":
         col_pick, col_search = st.columns([2, 1])
         with col_pick:
-            cursor_sample = db.students.find({}, {"student_id": 1, "_id": 0}).limit(50)
-            student_ids = [d["student_id"] for d in cursor_sample]
+            cursor_sample = database.find_students(db, {}, limit=50)
+            student_ids = [d["student_id"] for d in cursor_sample if "student_id" in d]
             pick_id = st.selectbox("Select Student ID:", student_ids if student_ids else ["STU-0001"])
 
         with col_search:
@@ -699,7 +564,7 @@ elif menu_choice == "Student Prediction":
         final_id = manual_search_id if manual_search_id else pick_id
 
         if final_id:
-            doc = db.students.find_one({"student_id": final_id})
+            doc = database.get_student_by_id(db, final_id)
             if doc:
                 selected_id = doc["student_id"]
                 student_data = doc
@@ -708,7 +573,7 @@ elif menu_choice == "Student Prediction":
                     f"Course: {COURSE_NAMES.get(doc.get('Course'), doc.get('Course'))}"
                 )
             else:
-                st.warning(f"Student '{final_id}' not found.")
+                st.warning(f"Student '{final_id}' not found in MongoDB.")
     else:
         selected_id = st.text_input("Student Identifier:", value="STU-CUSTOM-01").strip()
         c1, c2, c3 = st.columns(3)
@@ -796,7 +661,7 @@ elif menu_choice == "Student Prediction":
             else:
                 risk_tier = "Low Risk"
 
-            # Repeat submission prevention
+            # Repeat submission prevention via session state
             sub_sig = f"{selected_id}_{pred_class}_{tuple(input_vector)}"
             last_sig = st.session_state.get("last_pred_sig")
 
@@ -811,41 +676,41 @@ elif menu_choice == "Student Prediction":
                 "risk_tier": risk_tier,
             }
 
-            is_valid, validation_msg = validate_prediction_payload(pred_doc)
-            if not is_valid:
-                st.error(f"Payload validation failed: {validation_msg}")
-            else:
-                if last_sig == sub_sig:
-                    st.caption("Identical prediction already recorded. Showing existing result.")
-                else:
-                    res_ins = db.predictions.insert_one(pred_doc)
-                    st.session_state["last_pred_sig"] = sub_sig
-                    st.session_state["last_pred_id"] = str(res_ins.inserted_id)
-
+            if last_sig == sub_sig:
+                st.caption("Identical prediction already recorded. Showing existing result.")
                 doc_id_val = st.session_state.get("last_pred_id", "Recorded")
+            else:
+                success, msg, ins_id = database.insert_prediction(db, pred_doc)
+                if not success:
+                    st.error(msg)
+                    st.stop()
+                st.session_state["last_pred_sig"] = sub_sig
+                st.session_state["last_pred_id"] = str(ins_id)
+                doc_id_val = str(ins_id)
 
-                # Results Display
-                st.markdown(
-                    f"""
-                    <div class="dashboard-card" style="margin-top: 0.5rem;">
-                        <div style="font-size: 0.85rem; color: #9AA7B8;">Predicted Outcome:</div>
-                        <div style="font-size: 1.35rem; font-weight: 600; color: #E8EDF4;">{pred_class}</div>
-                        <div style="font-size: 0.82rem; color: #9AA7B8; margin-top: 4px;">
-                            Risk Tier: <span style="color: {'#EF4444' if risk_tier=='High Risk' else ('#F59E0B' if risk_tier=='Moderate Risk' else '#22C55E')}; font-weight: 600;">{risk_tier}</span> ({dropout_prob*100:.1f}%) | 
-                            Student ID: <code>{selected_id}</code> | Record ID: <code>{doc_id_val}</code>
-                        </div>
+            # Results Display
+            st.markdown(
+                f"""
+                <div class="dashboard-card" style="margin-top: 0.5rem;">
+                    <div style="font-size: 0.85rem; color: #9AA7B8;">Predicted Outcome:</div>
+                    <div style="font-size: 1.35rem; font-weight: 600; color: #E8EDF4;">{pred_class}</div>
+                    <div style="font-size: 0.82rem; color: #9AA7B8; margin-top: 4px;">
+                        Risk Tier: <span style="color: {'#EF4444' if risk_tier=='High Risk' else ('#F59E0B' if risk_tier=='Moderate Risk' else '#22C55E')}; font-weight: 600;">{risk_tier}</span> ({dropout_prob*100:.1f}%) | 
+                        Student ID: <code>{selected_id}</code> | Record ID: <code>{doc_id_val}</code>
                     </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-                st.write("**Model Class Probabilities:**")
-                for c_name, p_val in prob_dict.items():
-                    st.progress(float(p_val), text=f"{c_name}: {p_val*100:.1f}%")
+            st.write("**Model Class Probabilities:**")
+            for c_name, p_val in prob_dict.items():
+                st.progress(float(p_val), text=f"{c_name}: {p_val*100:.1f}%")
 
-                with st.expander("MongoDB Shell Insert Query", expanded=False):
-                    st.code(
-                        f"""
+            with st.expander("MongoDB Shell Reference (mongosh)", expanded=False):
+                st.code(
+                    f"""
+// Native MongoDB Shell equivalent for demonstration:
 const db = db.getSiblingDB("university_dropout_db");
 db.predictions.insertOne({{
   student_id: "{selected_id}",
@@ -856,13 +721,13 @@ db.predictions.insertOne({{
   feature_set: "{feature_mode}",
   risk_tier: "{risk_tier}"
 }});
-                        """,
-                        language="javascript",
-                    )
-
-                st.caption(
-                    "Statistical estimates for academic guidance. Not clinically or institutionally validated."
+                    """,
+                    language="javascript",
                 )
+
+            st.caption(
+                "Statistical estimates for academic guidance. Not clinically or institutionally validated."
+            )
 
 
 # ==============================================================================
@@ -874,7 +739,7 @@ elif menu_choice == "Student Records":
         <div style="margin-bottom: 0.75rem;">
             <div style="font-size: 1.35rem; font-weight: 600; color: #E8EDF4;">Student Records</div>
             <div style="font-size: 0.82rem; color: #9AA7B8;">
-                Real MongoDB CRUD operations executed directly against the <code>students</code> collection.
+                Native PyMongo CRUD operations executed directly against the <code>students</code> collection.
             </div>
         </div>
         """,
@@ -885,7 +750,7 @@ elif menu_choice == "Student Records":
         st.error("Database connection unavailable.")
         st.stop()
 
-    db = get_db()
+    db, _, _ = get_active_db()
 
     tab_find, tab_insert, tab_update, tab_delete = st.tabs([
         "Find & Filter",
@@ -904,10 +769,10 @@ elif menu_choice == "Student Records":
         if f_outcome != "All":
             q["Target"] = f_outcome
 
-        match_count = db.students.count_documents(q)
+        match_count = database.count_students(db, q)
         st.caption(f"Matching documents: {match_count:,}")
 
-        with st.expander("MongoDB Shell Query", expanded=False):
+        with st.expander("MongoDB Shell Query Reference", expanded=False):
             if f_id and f_outcome != "All":
                 st.code(f'db.students.find({{ student_id: /^"{f_id}"/i, Target: "{f_outcome}" }}).limit(25);', language="javascript")
             elif f_id:
@@ -917,7 +782,7 @@ elif menu_choice == "Student Records":
             else:
                 st.code("db.students.find({}).limit(25);", language="javascript")
 
-        results = list(db.students.find(q).limit(25))
+        results = database.find_students(db, q, limit=25)
         if results:
             df_res = pd.DataFrame(results)
             cols = [
@@ -944,7 +809,7 @@ elif menu_choice == "Student Records":
             ins_tuition = st.selectbox("Tuition Paid:", [1, 0], format_func=lambda x: "Yes (1)" if x == 1 else "No (0)")
             ins_sem1_grade = st.number_input("1st Sem Grade (0-20):", min_value=0.0, max_value=20.0, value=12.5)
 
-            with st.expander("MongoDB Shell insertOne Query", expanded=False):
+            with st.expander("MongoDB Shell insertOne Reference", expanded=False):
                 st.code(
                     f"""
 const db = db.getSiblingDB("university_dropout_db");
@@ -962,38 +827,36 @@ db.students.insertOne({{
                     language="javascript",
                 )
 
-            if st.form_submit_button("Insert Record", type="primary"):
-                if not ins_id:
-                    st.error("Student ID required.")
-                elif db.students.find_one({"student_id": ins_id}):
-                    st.error(f"Student ID '{ins_id}' already exists.")
+            if st.form_submit_button("Insert Record via PyMongo", type="primary"):
+                new_doc = {
+                    "student_id": ins_id,
+                    "Target": ins_target,
+                    "Age at enrollment": int(ins_age),
+                    "Course": int(ins_course),
+                    "Tuition fees up to date": int(ins_tuition),
+                    "Curricular units 1st sem (grade)": float(ins_sem1_grade),
+                    "Curricular units 1st sem (approved)": 5,
+                    "Curricular units 1st sem (enrolled)": 6,
+                    "Curricular units 2nd sem (approved)": 5,
+                    "Curricular units 2nd sem (enrolled)": 6,
+                    "Curricular units 2nd sem (grade)": float(ins_sem1_grade),
+                }
+                success, msg, ins_id_val = database.insert_student(db, new_doc)
+                if success:
+                    st.success(f"{msg} Document ID: {ins_id_val}")
                 else:
-                    new_doc = {
-                        "student_id": ins_id,
-                        "Target": ins_target,
-                        "Age at enrollment": int(ins_age),
-                        "Course": int(ins_course),
-                        "Tuition fees up to date": int(ins_tuition),
-                        "Curricular units 1st sem (grade)": float(ins_sem1_grade),
-                        "Curricular units 1st sem (approved)": 5,
-                        "Curricular units 1st sem (enrolled)": 6,
-                        "Curricular units 2nd sem (approved)": 5,
-                        "Curricular units 2nd sem (enrolled)": 6,
-                        "Curricular units 2nd sem (grade)": float(ins_sem1_grade),
-                    }
-                    res_in = db.students.insert_one(new_doc)
-                    st.success(f"Inserted document with ID: {res_in.inserted_id}")
+                    st.error(msg)
 
     with tab_update:
         upd_id = st.text_input("Student ID to Update:", value="STU-0001").strip()
-        doc_upd = db.students.find_one({"student_id": upd_id})
+        doc_upd = database.get_student_by_id(db, upd_id)
 
         if doc_upd:
             st.caption(f"Current Status: {doc_upd.get('Target')} | Tuition Status: {doc_upd.get('Tuition fees up to date')}")
             new_target = st.selectbox("New Academic Outcome:", ["Dropout", "Enrolled", "Graduate"])
             new_tuition = st.selectbox("New Tuition Status:", [1, 0], format_func=lambda x: "Paid (1)" if x == 1 else "In Arrears (0)")
 
-            with st.expander("MongoDB Shell updateOne Query", expanded=False):
+            with st.expander("MongoDB Shell updateOne Reference", expanded=False):
                 st.code(
                     f"""
 const db = db.getSiblingDB("university_dropout_db");
@@ -1010,23 +873,27 @@ db.students.updateOne(
                     language="javascript",
                 )
 
-            if st.button("Update Record", type="primary"):
-                res_upd = db.students.update_one(
-                    {"student_id": upd_id},
-                    {"$set": {"Target": new_target, "Tuition fees up to date": int(new_tuition)}},
+            if st.button("Update Record via PyMongo", type="primary"):
+                success, msg, count = database.update_student(
+                    db,
+                    upd_id,
+                    {"Target": new_target, "Tuition fees up to date": int(new_tuition)},
                 )
-                st.success(f"Updated {res_upd.modified_count} record.")
+                if success:
+                    st.success(msg)
+                else:
+                    st.error(msg)
         else:
-            st.caption("Provide an existing Student ID.")
+            st.caption("Provide an existing Student ID to view and update.")
 
     with tab_delete:
         del_id = st.text_input("Student ID to Delete:", value="").strip()
         if del_id:
-            doc_del = db.students.find_one({"student_id": del_id})
+            doc_del = database.get_student_by_id(db, del_id)
             if doc_del:
                 st.warning(f"Document identified: {del_id} ({doc_del.get('Target')}).")
 
-                with st.expander("MongoDB Shell deleteOne Query", expanded=False):
+                with st.expander("MongoDB Shell deleteOne Reference", expanded=False):
                     st.code(
                         f"""
 const db = db.getSiblingDB("university_dropout_db");
@@ -1036,11 +903,14 @@ db.students.deleteOne({{ student_id: "{del_id}" }});
                     )
 
                 confirm = st.checkbox("Confirm permanent deletion of this record.")
-                if st.button("Delete Record", type="primary", disabled=not confirm):
-                    res_del = db.students.delete_one({"student_id": del_id})
-                    st.success(f"Deleted {res_del.deleted_count} document.")
+                if st.button("Delete Record via PyMongo", type="primary", disabled=not confirm):
+                    success, msg, count = database.delete_student(db, del_id)
+                    if success:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
             else:
-                st.info("Student ID not found.")
+                st.info("Student ID not found in MongoDB.")
 
 
 # ==============================================================================
@@ -1052,7 +922,7 @@ elif menu_choice == "Prediction History":
         <div style="margin-bottom: 0.75rem;">
             <div style="font-size: 1.35rem; font-weight: 600; color: #E8EDF4;">Prediction History</div>
             <div style="font-size: 0.82rem; color: #9AA7B8;">
-                Real-time audit records retrieved from <code>university_dropout_db.predictions</code>.
+                Real-time audit records retrieved via PyMongo from <code>university_dropout_db.predictions</code>.
             </div>
         </div>
         """,
@@ -1063,53 +933,28 @@ elif menu_choice == "Prediction History":
         st.error("Database connection unavailable.")
         st.stop()
 
-    db = get_db()
-    pred_total = db.predictions.count_documents({})
+    db, _, _ = get_active_db()
+    pred_total = database.count_predictions(db)
     st.caption(f"Total Prediction Documents: {pred_total:,}")
 
     outcome_filter = st.selectbox("Filter Outcome:", ["All", "Dropout", "Enrolled", "Graduate"])
-    query_p = {}
-    if outcome_filter != "All":
-        query_p["predicted_outcome"] = outcome_filter
 
-    with st.expander("MongoDB Shell Query", expanded=False):
+    with st.expander("MongoDB Shell Reference", expanded=False):
         if outcome_filter != "All":
             st.code(f'db.predictions.find({{ predicted_outcome: "{outcome_filter}" }}).sort({{ prediction_timestamp: -1 }}).limit(50);', language="javascript")
         else:
             st.code('db.predictions.find().sort({ prediction_timestamp: -1 }).limit(50);', language="javascript")
 
-    preds = list(db.predictions.find(query_p).sort("prediction_timestamp", -1).limit(50))
+    normalized_preds = database.get_prediction_history(db, outcome_filter=outcome_filter, limit=50)
 
-    if preds:
-        normalized = []
-        for p in preds:
-            raw_ts = p.get("prediction_timestamp") or p.get("timestamp")
-            if isinstance(raw_ts, datetime):
-                ts_str = raw_ts.strftime("%Y-%m-%d %H:%M:%S UTC")
-            elif isinstance(raw_ts, str):
-                ts_str = raw_ts
-            else:
-                ts_str = "N/A"
-
-            risk = p.get("risk_tier") or p.get("dropout_risk") or "N/A"
-            normalized.append({
-                "Timestamp": ts_str,
-                "Student ID": p.get("student_id", "N/A"),
-                "Predicted Outcome": p.get("predicted_outcome", "N/A"),
-                "Risk Tier": risk,
-                "Model": p.get("model_name", "Random Forest Classifier"),
-                "Feature Set": p.get("feature_set") or p.get("prediction_mode") or "Full Features",
-                "Document ID": str(p.get("_id")),
-                "_raw": p,
-            })
-
-        df_show = pd.DataFrame(normalized)
+    if normalized_preds:
+        df_show = pd.DataFrame(normalized_preds)
         cols_display = ["Timestamp", "Student ID", "Predicted Outcome", "Risk Tier", "Model", "Feature Set", "Document ID"]
         st.dataframe(df_show[cols_display], use_container_width=True)
 
         st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
-        sel_pred_id = st.selectbox("Inspect Document BSON:", [r["Document ID"] for r in normalized])
-        sel_item = next((r for r in normalized if r["Document ID"] == sel_pred_id), None)
+        sel_pred_id = st.selectbox("Inspect Document BSON:", [r["Document ID"] for r in normalized_preds])
+        sel_item = next((r for r in normalized_preds if r["Document ID"] == sel_pred_id), None)
         if sel_item:
             clean_raw = dict(sel_item["_raw"])
             clean_raw["_id"] = str(clean_raw["_id"])
@@ -1121,15 +966,16 @@ elif menu_choice == "Prediction History":
 
 
 # ==============================================================================
-# SECTION 5: MODEL EVALUATION
+# SECTION 5: MODEL EVALUATION & BENCHMARKS
 # ==============================================================================
 elif menu_choice == "Model Evaluation":
     st.markdown(
         """
         <div style="margin-bottom: 0.75rem;">
-            <div style="font-size: 1.35rem; font-weight: 600; color: #E8EDF4;">Model Evaluation</div>
+            <div style="font-size: 1.35rem; font-weight: 600; color: #E8EDF4;">Model Evaluation & Benchmarks</div>
             <div style="font-size: 0.82rem; color: #9AA7B8;">
-                Measured benchmarks on the stratified 20% test partition (N = 885).
+                Evaluates Logistic Regression (baseline) and Random Forest Classifier on a held-out stratified 20% test partition (N = 885) from <code>dataset.csv</code>.
+                Transformations fitted strictly on training data.
             </div>
         </div>
         """,
@@ -1137,61 +983,86 @@ elif menu_choice == "Model Evaluation":
     )
 
     if model_package is None:
-        st.error("model.pkl not found. Please train the model in ML_Training.ipynb.")
+        st.error("model.pkl not found. Please ensure model.pkl exists in project directory.")
         st.stop()
 
     lr_acc = model_package.get("lr_accuracy", 0.0)
     rf_acc = model_package.get("rf_accuracy", 0.0)
-    report = model_package.get("classification_report", {})
+    rf_report = model_package.get("rf_report", model_package.get("classification_report", {}))
+    lr_report = model_package.get("lr_report", {})
+    rf_metrics = model_package.get("rf_metrics", {})
+    lr_metrics = model_package.get("lr_metrics", {})
 
+    # Top Metric Cards
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Baseline Logistic Regression", f"{lr_acc*100:.2f}%")
-    m2.metric("Random Forest Accuracy", f"{rf_acc*100:.2f}%")
-    m3.metric("Random Forest Macro F1", f"{report.get('macro avg', {}).get('f1-score', 0.0)*100:.2f}%")
-    m4.metric("Dropout Recall", f"{report.get('Dropout', {}).get('recall', 0.0)*100:.2f}%")
+    m1.metric("Baseline Logistic Regression Accuracy", f"{lr_acc*100:.2f}%")
+    m2.metric("Random Forest Classifier Accuracy", f"{rf_acc*100:.2f}%")
+    m3.metric("Random Forest Macro F1", f"{rf_report.get('macro avg', {}).get('f1-score', 0.0)*100:.2f}%")
+    m4.metric("Dropout Specific Recall", f"{rf_report.get('Dropout', {}).get('recall', 0.0)*100:.2f}%")
 
-    st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
 
-    # Classification Table
+    # 1. Compact Model Comparison Table
+    st.markdown(
+        "<div style='font-size: 0.95rem; font-weight: 600; color: #E8EDF4; margin-bottom: 4px;'>Model Comparison Table (Held-Out Test Set)</div>",
+        unsafe_allow_html=True,
+    )
+
+    comparison_data = [
+        {
+            "Model": "Logistic Regression (Baseline)",
+            "Accuracy": f"{lr_metrics.get('accuracy', lr_acc)*100:.2f}%",
+            "Macro Precision": f"{lr_metrics.get('macro_precision', lr_report.get('macro avg', {}).get('precision', 0.0))*100:.2f}%",
+            "Macro Recall": f"{lr_metrics.get('macro_recall', lr_report.get('macro avg', {}).get('recall', 0.0))*100:.2f}%",
+            "Macro F1": f"{lr_metrics.get('macro_f1', lr_report.get('macro avg', {}).get('f1-score', 0.0))*100:.2f}%",
+            "Weighted F1": f"{lr_metrics.get('weighted_f1', lr_report.get('weighted avg', {}).get('f1-score', 0.0))*100:.2f}%",
+            "Dropout Precision": f"{lr_metrics.get('dropout_precision', lr_report.get('Dropout', {}).get('precision', 0.0))*100:.2f}%",
+            "Dropout Recall": f"{lr_metrics.get('dropout_recall', lr_report.get('Dropout', {}).get('recall', 0.0))*100:.2f}%",
+            "Dropout F1": f"{lr_metrics.get('dropout_f1', lr_report.get('Dropout', {}).get('f1-score', 0.0))*100:.2f}%",
+        },
+        {
+            "Model": "Random Forest Classifier (Selected)",
+            "Accuracy": f"{rf_metrics.get('accuracy', rf_acc)*100:.2f}%",
+            "Macro Precision": f"{rf_metrics.get('macro_precision', rf_report.get('macro avg', {}).get('precision', 0.0))*100:.2f}%",
+            "Macro Recall": f"{rf_metrics.get('macro_recall', rf_report.get('macro avg', {}).get('recall', 0.0))*100:.2f}%",
+            "Macro F1": f"{rf_metrics.get('macro_f1', rf_report.get('macro avg', {}).get('f1-score', 0.0))*100:.2f}%",
+            "Weighted F1": f"{rf_metrics.get('weighted_f1', rf_report.get('weighted avg', {}).get('f1-score', 0.0))*100:.2f}%",
+            "Dropout Precision": f"{rf_metrics.get('dropout_precision', rf_report.get('Dropout', {}).get('precision', 0.0))*100:.2f}%",
+            "Dropout Recall": f"{rf_metrics.get('dropout_recall', rf_report.get('Dropout', {}).get('recall', 0.0))*100:.2f}%",
+            "Dropout F1": f"{rf_metrics.get('dropout_f1', rf_report.get('Dropout', {}).get('f1-score', 0.0))*100:.2f}%",
+        },
+    ]
+    st.table(pd.DataFrame(comparison_data))
+
+    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+
+    # 2. Detailed Per-Model Analysis
+    selected_eval_model = st.selectbox(
+        "Select Model for Detailed Classification Breakdown:",
+        ["Random Forest Classifier (Selected)", "Logistic Regression (Baseline)"],
+    )
+
+    is_rf = "Random Forest" in selected_eval_model
+    active_report = rf_report if is_rf else lr_report
+    active_cm = (
+        np.array(model_package.get("rf_confusion_matrix", model_package.get("confusion_matrix", [])))
+        if is_rf
+        else np.array(model_package.get("lr_confusion_matrix", []))
+    )
+
     classes_eval = ["Dropout", "Enrolled", "Graduate"]
-    rows = []
-    for c in classes_eval:
-        c_data = report.get(c, {})
-        rows.append({
-            "Class": c,
-            "Precision": f"{c_data.get('precision', 0.0):.4f}",
-            "Recall": f"{c_data.get('recall', 0.0):.4f}",
-            "F1-Score": f"{c_data.get('f1-score', 0.0):.4f}",
-            "Support": int(c_data.get("support", 0)),
-        })
-    rows.append({
-        "Class": "Macro Average",
-        "Precision": f"{report.get('macro avg', {}).get('precision', 0.0):.4f}",
-        "Recall": f"{report.get('macro avg', {}).get('recall', 0.0):.4f}",
-        "F1-Score": f"{report.get('macro avg', {}).get('f1-score', 0.0):.4f}",
-        "Support": int(report.get("macro avg", {}).get("support", 0)),
-    })
-    rows.append({
-        "Class": "Weighted Average",
-        "Precision": f"{report.get('weighted avg', {}).get('precision', 0.0):.4f}",
-        "Recall": f"{report.get('weighted avg', {}).get('recall', 0.0):.4f}",
-        "F1-Score": f"{report.get('weighted avg', {}).get('f1-score', 0.0):.4f}",
-        "Support": int(report.get("weighted avg", {}).get("support", 0)),
-    })
 
-    st.table(pd.DataFrame(rows))
+    col_eval_left, col_eval_right = st.columns(2)
 
-    c_left, c_right = st.columns(2)
-    with c_left:
+    with col_eval_left:
         st.markdown(
-            "<div style='font-size: 0.92rem; font-weight: 600; color: #E8EDF4; margin-bottom: 4px;'>Confusion Matrix (Random Forest)</div>",
+            f"<div style='font-size: 0.92rem; font-weight: 600; color: #E8EDF4; margin-bottom: 4px;'>Confusion Matrix: {selected_eval_model}</div>",
             unsafe_allow_html=True,
         )
-        cm = np.array(model_package.get("confusion_matrix", []))
-        if len(cm) > 0:
-            fig_cm, ax_cm = create_dark_figure(figsize=(5, 3))
+        if len(active_cm) > 0:
+            fig_cm, ax_cm = create_dark_figure(figsize=(4.8, 3.1))
             sns.heatmap(
-                cm,
+                active_cm,
                 annot=True,
                 fmt="d",
                 cmap="Blues",
@@ -1199,36 +1070,108 @@ elif menu_choice == "Model Evaluation":
                 yticklabels=classes_eval,
                 ax=ax_cm,
                 cbar=False,
-                annot_kws={"size": 9, "color": "#E8EDF4"},
+                annot_kws={"size": 9.5, "color": "#E8EDF4"},
             )
-            ax_cm.set_xlabel("Predicted Class")
-            ax_cm.set_ylabel("True Class")
+            ax_cm.set_xlabel("Predicted Label")
+            ax_cm.set_ylabel("Actual (True) Label")
             plt.tight_layout()
             st.pyplot(fig_cm)
+        else:
+            st.info("Confusion matrix data unavailable.")
 
-    with c_right:
+    with col_eval_right:
         st.markdown(
-            "<div style='font-size: 0.92rem; font-weight: 600; color: #E8EDF4; margin-bottom: 4px;'>Top 10 Feature Importances</div>",
+            f"<div style='font-size: 0.92rem; font-weight: 600; color: #E8EDF4; margin-bottom: 4px;'>Classification Report: {selected_eval_model}</div>",
             unsafe_allow_html=True,
         )
-        feat_imp = model_package.get("feature_importances", {})
-        if feat_imp:
-            df_imp = pd.Series(feat_imp).head(10).sort_values(ascending=True)
-            fig_imp, ax_imp = create_dark_figure(figsize=(5, 3))
-            ax_imp.barh(df_imp.index, df_imp.values, color="#4C8DFF", height=0.6)
-            ax_imp.set_xlabel("Gini Importance Score")
-            ax_imp.grid(axis="x", linestyle="--", alpha=0.15, color="#E8EDF4")
-            plt.tight_layout()
-            st.pyplot(fig_imp)
+        if active_report:
+            rows = []
+            for c in classes_eval:
+                c_data = active_report.get(c, {})
+                rows.append({
+                    "Target Class": c,
+                    "Precision": f"{c_data.get('precision', 0.0):.4f}",
+                    "Recall": f"{c_data.get('recall', 0.0):.4f}",
+                    "F1-Score": f"{c_data.get('f1-score', 0.0):.4f}",
+                    "Support (N)": int(c_data.get("support", 0)),
+                })
+            rows.append({
+                "Target Class": "Macro Average",
+                "Precision": f"{active_report.get('macro avg', {}).get('precision', 0.0):.4f}",
+                "Recall": f"{active_report.get('macro avg', {}).get('recall', 0.0):.4f}",
+                "F1-Score": f"{active_report.get('macro avg', {}).get('f1-score', 0.0):.4f}",
+                "Support (N)": int(active_report.get("macro avg", {}).get("support", 0)),
+            })
+            rows.append({
+                "Target Class": "Weighted Average",
+                "Precision": f"{active_report.get('weighted avg', {}).get('precision', 0.0):.4f}",
+                "Recall": f"{active_report.get('weighted avg', {}).get('recall', 0.0):.4f}",
+                "F1-Score": f"{active_report.get('weighted avg', {}).get('f1-score', 0.0):.4f}",
+                "Support (N)": int(active_report.get("weighted avg", {}).get("support", 0)),
+            })
+            st.table(pd.DataFrame(rows))
+        else:
+            st.info("Classification report unavailable.")
+
+    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+
+    # 3. Feature Importances (Random Forest)
+    st.markdown(
+        "<div style='font-size: 0.92rem; font-weight: 600; color: #E8EDF4; margin-bottom: 4px;'>Top 10 Feature Importances (Gini Index)</div>",
+        unsafe_allow_html=True,
+    )
+    feat_imp = model_package.get("feature_importances", {})
+    if feat_imp:
+        df_imp = pd.Series(feat_imp).head(10).sort_values(ascending=True)
+        fig_imp, ax_imp = create_dark_figure(figsize=(9, 3.2))
+        ax_imp.barh(df_imp.index, df_imp.values, color="#4C8DFF", height=0.6)
+        ax_imp.set_xlabel("Gini Importance Score")
+        ax_imp.grid(axis="x", linestyle="--", alpha=0.15, color="#E8EDF4")
+        plt.tight_layout()
+        st.pyplot(fig_imp)
+
+    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+
+    # 4. Interactive Test Sample Probability Inspection
+    test_samples = model_package.get("test_samples", {})
+    if test_samples and "X_sample" in test_samples:
+        st.markdown(
+            "<div style='font-size: 0.92rem; font-weight: 600; color: #E8EDF4; margin-bottom: 4px;'>Interactive Test Sample Probability Verification</div>",
+            unsafe_allow_html=True,
+        )
+        samples_list = test_samples["X_sample"]
+        y_samples_list = test_samples["y_sample"]
+
+        sample_idx = st.selectbox(
+            "Select Held-Out Test Record to inspect genuine predict_proba():",
+            range(len(samples_list)),
+            format_func=lambda i: f"Test Sample #{i+1} (Actual Outcome: {y_samples_list[i]})",
+        )
+
+        sample_df = pd.DataFrame([samples_list[sample_idx]], columns=model_package["feature_names"])
+        active_model = model_package["rf_model"] if is_rf else model_package["lr_model"]
+
+        sample_pred = active_model.predict(sample_df)[0]
+        sample_probs = active_model.predict_proba(sample_df)[0]
+        sample_prob_dict = {cls_name: round(float(p), 4) for cls_name, p in zip(classes_eval, sample_probs)}
+
+        c_s1, c_s2 = st.columns(2)
+        with c_s1:
+            st.caption(f"Actual Outcome: **{y_samples_list[sample_idx]}**")
+            st.caption(f"Model Predicted: **{sample_pred}**")
+        with c_s2:
+            st.caption("Actual Model Estimated Probabilities:")
+            for c_n, p_v in sample_prob_dict.items():
+                st.progress(float(p_v), text=f"{c_n}: {p_v*100:.1f}%")
 
     st.markdown(
         """
-        <div class="dashboard-card" style="margin-top: 0.75rem;">
-            <div style="font-size: 0.85rem; font-weight: 600; color: #E8EDF4; margin-bottom: 4px;">Methodology & Feature Timing</div>
-            <div style="font-size: 0.78rem; color: #9AA7B8; line-height: 1.4;">
-                - <b>Scope:</b> Predicts end-of-program academic outcomes using demographic, socioeconomic, and 1st & 2nd semester academic features.<br>
-                - <b>Feature Timing:</b> 2nd semester approved units and grades are the strongest predictive signals. For early pre-admission prediction, 2nd semester attributes must be omitted to prevent target leakage.<br>
-                - <b>Academic Context:</b> Educational demonstration model for CSE494; not clinically or institutionally validated.
+        <div class="dashboard-card" style="margin-top: 0.85rem;">
+            <div style="font-size: 0.85rem; font-weight: 600; color: #E8EDF4; margin-bottom: 4px;'>Evaluation Methodology & Academic Scope</div>
+            <div style="font-size: 0.78rem; color: #9AA7B8; line-height: 1.45;">
+                - <b>Train/Test Protocol:</b> 80% training / 20% test stratified split on 4,424 records from <code>dataset.csv</code> (random_state=42). Preprocessing transformations (scaling) fitted strictly on training data.<br>
+                - <b>Early Prediction Scope & Information Leakage:</b> Second-semester curricular units approved and grade averages are the highest-ranked features. If deploying an early pre-enrollment screening model, second-semester features must be omitted to prevent premature information leakage.<br>
+                - <b>Academic Context:</b> Educational demonstration model for CSE494; not clinically, operationally, or production-validated.
             </div>
         </div>
         """,
@@ -1245,7 +1188,7 @@ elif menu_choice == "MongoDB Analytics":
         <div style="margin-bottom: 0.75rem;">
             <div style="font-size: 1.35rem; font-weight: 600; color: #E8EDF4;">MongoDB Analytics</div>
             <div style="font-size: 0.82rem; color: #9AA7B8;">
-                Real aggregation pipelines and query optimization execution plans (<code>explain</code>).
+                Real PyMongo aggregation pipelines and query optimization execution plans (<code>explain</code>).
             </div>
         </div>
         """,
@@ -1256,7 +1199,7 @@ elif menu_choice == "MongoDB Analytics":
         st.error("Database connection unavailable.")
         st.stop()
 
-    db = get_db()
+    db, _, _ = get_active_db()
 
     tab_agg, tab_explain, tab_compass = st.tabs([
         "Aggregation Pipelines",
@@ -1270,7 +1213,7 @@ elif menu_choice == "MongoDB Analytics":
             unsafe_allow_html=True,
         )
 
-        with st.expander("MongoDB Shell Aggregation Pipeline", expanded=False):
+        with st.expander("MongoDB Shell Reference (mongosh)", expanded=False):
             st.code(
                 """
 const db = db.getSiblingDB("university_dropout_db");
@@ -1303,40 +1246,7 @@ db.students.aggregate([
                 language="javascript",
             )
 
-        course_pipeline = [
-            {
-                "$group": {
-                    "_id": "$Course",
-                    "total": {"$sum": 1},
-                    "dropouts": {
-                        "$sum": {"$cond": [{"$eq": ["$Target", "Dropout"]}, 1, 0]}
-                    },
-                }
-            },
-            {
-                "$project": {
-                    "course_id": "$_id",
-                    "total_students": "$total",
-                    "dropouts": "$dropouts",
-                    "dropout_rate": {
-                        "$cond": [
-                            {"$eq": ["$total", 0]},
-                            0,
-                            {
-                                "$round": [
-                                    {"$multiply": [{"$divide": ["$dropouts", "$total"]}, 100]},
-                                    1,
-                                ]
-                            },
-                        ]
-                    },
-                    "_id": 0,
-                }
-            },
-            {"$sort": {"dropout_rate": -1}},
-        ]
-        course_stats = list(db.students.aggregate(course_pipeline))
-
+        course_stats = database.get_top_courses_dropout_rate(db, limit=20)
         if course_stats:
             df_c = pd.DataFrame(course_stats)
             df_c["Course Name"] = df_c["course_id"].map(lambda cid: COURSE_NAMES.get(cid, f"Course {cid}"))
@@ -1350,7 +1260,7 @@ db.students.aggregate([
             unsafe_allow_html=True,
         )
 
-        with st.expander("MongoDB Shell Prediction Aggregation", expanded=False):
+        with st.expander("MongoDB Shell Reference (mongosh)", expanded=False):
             st.code(
                 """
 const db = db.getSiblingDB("university_dropout_db");
@@ -1362,13 +1272,9 @@ db.predictions.aggregate([
                 language="javascript",
             )
 
-        pred_pipeline = [
-            {"$group": {"_id": "$predicted_outcome", "count": {"$sum": 1}}},
-            {"$sort": {"count": -1}},
-        ]
-        pred_agg = list(db.predictions.aggregate(pred_pipeline))
+        pred_agg = database.get_prediction_outcome_distribution(db)
         if pred_agg:
-            st.dataframe(pd.DataFrame([{"Outcome": p["_id"], "Count": p["count"]} for p in pred_agg]), use_container_width=True)
+            st.dataframe(pd.DataFrame([{"Outcome": p["outcome"], "Count": p["count"]} for p in pred_agg]), use_container_width=True)
         else:
             st.caption("No prediction audit records to aggregate.")
 
@@ -1377,13 +1283,13 @@ db.predictions.aggregate([
             """
             <div style="font-size: 0.82rem; color: #9AA7B8; margin-bottom: 6px;">
                 Comparison between indexed query execution using <code>idx_unique_student_id</code> (IXSCAN) 
-                and unindexed field query (COLLSCAN) across documents.
+                and unindexed field query (COLLSCAN) across documents using PyMongo's <code>explain()</code>.
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-        with st.expander("MongoDB Shell explain() Queries", expanded=False):
+        with st.expander("MongoDB Shell explain() Reference", expanded=False):
             st.code(
                 """
 const db = db.getSiblingDB("university_dropout_db");
@@ -1397,12 +1303,8 @@ db.students.find({ "Age at enrollment": 20 }).explain("executionStats");
                 language="javascript",
             )
 
-        plan_indexed = db.students.find({"student_id": "STU-0001"}).explain()
-        stage_idx = plan_indexed.get("queryPlanner", {}).get("winningPlan", {}).get("stage", "IXSCAN")
-        index_used = plan_indexed.get("queryPlanner", {}).get("winningPlan", {}).get("indexName", "idx_unique_student_id")
-
-        plan_unindexed = db.students.find({"Age at enrollment": 20}).explain()
-        stage_unidx = plan_unindexed.get("queryPlanner", {}).get("winningPlan", {}).get("stage", "COLLSCAN")
+        plan_indexed = database.explain_query(db, "students", {"student_id": "STU-0001"})
+        plan_unindexed = database.explain_query(db, "students", {"Age at enrollment": 20})
 
         col_ex1, col_ex2 = st.columns(2)
         with col_ex1:
@@ -1411,9 +1313,9 @@ db.students.find({ "Age at enrollment": 20 }).explain("executionStats");
                 <div class="dashboard-card">
                     <div style="font-size: 0.85rem; font-weight: 600; color: #22C55E;">Indexed Query: student_id</div>
                     <div style="font-size: 0.78rem; color: #E8EDF4; margin-top: 4px;">
-                        Execution Stage: <code>{stage_idx}</code><br>
-                        Index Name: <code>{index_used}</code><br>
-                        Complexity: Logarithmic B-Tree lookup.
+                        Execution Stage: <code>{plan_indexed['stage']}</code><br>
+                        Index Name: <code>{plan_indexed['index_name']}</code><br>
+                        Complexity: Logarithmic B-Tree lookup via PyMongo.
                     </div>
                 </div>
                 """,
@@ -1426,9 +1328,9 @@ db.students.find({ "Age at enrollment": 20 }).explain("executionStats");
                 <div class="dashboard-card">
                     <div style="font-size: 0.85rem; font-weight: 600; color: #EF4444;">Unindexed Query: Age at enrollment</div>
                     <div style="font-size: 0.78rem; color: #E8EDF4; margin-top: 4px;">
-                        Execution Stage: <code>{stage_unidx}</code><br>
-                        Index Name: <code>None</code><br>
-                        Complexity: Linear Collection Scan (COLLSCAN).
+                        Execution Stage: <code>{plan_unindexed['stage']}</code><br>
+                        Index Name: <code>{plan_unindexed['index_name']}</code><br>
+                        Complexity: Linear Collection Scan (COLLSCAN) via PyMongo.
                     </div>
                 </div>
                 """,
