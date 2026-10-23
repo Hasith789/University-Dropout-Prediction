@@ -242,9 +242,21 @@ COURSE_NAMES = {
 # ==============================================================================
 # DATABASE CONNECTION
 # ==============================================================================
+def get_mongo_client(uri: str, timeout_ms: int = 3000) -> MongoClient:
+    """Create a MongoClient configured with proper TLS/SSL certificates."""
+    kwargs = {"serverSelectionTimeoutMS": timeout_ms}
+    if "mongodb.net" in uri or "+srv" in uri:
+        try:
+            import certifi
+            kwargs["tlsCAFile"] = certifi.where()
+        except ImportError:
+            pass
+    return MongoClient(uri, **kwargs)
+
+
 def get_db():
     uri, db_name = get_connection_config()
-    client = MongoClient(uri, serverSelectionTimeoutMS=2000)
+    client = get_mongo_client(uri, timeout_ms=3000)
     return client[db_name]
 
 
@@ -253,7 +265,7 @@ def test_db_connection():
     is_atlas = "mongodb.net" in uri or "+srv" in uri
     host_type = "MongoDB Atlas" if is_atlas else "Local MongoDB"
     try:
-        client = MongoClient(uri, serverSelectionTimeoutMS=2000)
+        client = get_mongo_client(uri, timeout_ms=3000)
         client.admin.command("ping")
         server_info = client.server_info()
         version = server_info.get("version", "Unknown")
@@ -261,7 +273,13 @@ def test_db_connection():
         return True, host_type, version, None
     except Exception as e:
         err = str(e)
-        if "localhost:27017" in uri and ("[Errno 111]" in err or "Connection refused" in err):
+        if "TLSV1_ALERT_INTERNAL_ERROR" in err or "SSL handshake failed" in err:
+            err = (
+                "Atlas SSL handshake failed. In MongoDB Atlas, this occurs when the connecting IP address "
+                "is not whitelisted. In your MongoDB Atlas Console, go to Network Access -> Add IP Address "
+                "-> Allow Access from Anywhere (0.0.0.0/0)."
+            )
+        elif "localhost:27017" in uri and ("[Errno 111]" in err or "Connection refused" in err):
             err = (
                 "Cannot connect to local MongoDB. If running on Streamlit Cloud, add your "
                 "MongoDB Atlas connection string in Streamlit App Settings > Secrets."
