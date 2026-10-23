@@ -18,8 +18,37 @@ from pymongo import MongoClient
 
 # Load environment configuration
 load_dotenv(override=True)
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-DATABASE_NAME = os.getenv("MONGODB_DATABASE", "university_dropout_db")
+
+def get_connection_config():
+    """Retrieve MongoDB URI and Database Name supporting Streamlit Cloud Secrets and .env."""
+    uri = None
+    db_name = None
+
+    # 1. Streamlit Cloud Secrets (st.secrets)
+    try:
+        if hasattr(st, "secrets"):
+            if "MONGODB_URI" in st.secrets:
+                uri = str(st.secrets["MONGODB_URI"]).strip()
+            if "MONGODB_DATABASE" in st.secrets:
+                db_name = str(st.secrets["MONGODB_DATABASE"]).strip()
+    except Exception:
+        pass
+
+    # 2. Environment Variables (.env or OS)
+    if not uri:
+        uri = os.getenv("MONGODB_URI")
+    if not db_name:
+        db_name = os.getenv("MONGODB_DATABASE")
+
+    # 3. Fallback default
+    if not uri:
+        uri = "mongodb://localhost:27017"
+    if not db_name:
+        db_name = "university_dropout_db"
+
+    return uri, db_name
+
+MONGODB_URI, DATABASE_NAME = get_connection_config()
 
 # Set page configuration
 st.set_page_config(
@@ -214,24 +243,30 @@ COURSE_NAMES = {
 # DATABASE CONNECTION
 # ==============================================================================
 def get_db():
-    client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=2000)
-    return client[DATABASE_NAME]
+    uri, db_name = get_connection_config()
+    client = MongoClient(uri, serverSelectionTimeoutMS=2000)
+    return client[db_name]
 
 
 def test_db_connection():
+    uri, db_name = get_connection_config()
+    is_atlas = "mongodb.net" in uri or "+srv" in uri
+    host_type = "MongoDB Atlas" if is_atlas else "Local MongoDB"
     try:
-        client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=2000)
+        client = MongoClient(uri, serverSelectionTimeoutMS=2000)
         client.admin.command("ping")
         server_info = client.server_info()
         version = server_info.get("version", "Unknown")
         client.close()
-        is_atlas = "mongodb.net" in MONGODB_URI or "+srv" in MONGODB_URI
-        host_type = "MongoDB Atlas" if is_atlas else "Local MongoDB"
         return True, host_type, version, None
     except Exception as e:
-        is_atlas = "mongodb.net" in MONGODB_URI or "+srv" in MONGODB_URI
-        host_type = "MongoDB Atlas" if is_atlas else "Local MongoDB"
-        return False, host_type, None, str(e)
+        err = str(e)
+        if "localhost:27017" in uri and ("[Errno 111]" in err or "Connection refused" in err):
+            err = (
+                "Cannot connect to local MongoDB. If running on Streamlit Cloud, add your "
+                "MongoDB Atlas connection string in Streamlit App Settings > Secrets."
+            )
+        return False, host_type, None, err
 
 
 @st.cache_resource
